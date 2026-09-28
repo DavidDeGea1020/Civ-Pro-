@@ -4,9 +4,9 @@ Sep 28, 2026 · @Eric
 
 ## Overview
 
-The update workflow uses a hub-and-spoke design. One hub topic reads `Global.CurrentStep` and sends the user to the right section topic, and every section topic ends back at the hub. The user's position is stored in global variables, not in the topic stack. That means they can ask a side question, go back to an earlier section, jump ahead, or open their change list, and still land back on the step they were on.
+The update workflow uses a hub-and-spoke design. One hub topic reads `Global.CurrentStep` and sends the user to the right section topic, and every section topic ends back at the hub. The user's position is stored in global variables, not in the topic stack. That means they can ask a side question, go back to an earlier section, or open their change list, and still land back on the step they were on.
 
-Each update starts and finishes in one conversation. Nothing is saved until the user submits, and there is no draft to resume later.
+Each update starts and finishes in one conversation. Nothing is saved until the user submits, and there is no draft to resume later. Users can go back to any section they have already reached, but they can never skip ahead, and they can submit only after every section is reviewed.
 
 &#91;embedded content: JD update architecture · hub, five section topics, review\]
 
@@ -17,7 +17,7 @@ You will build these topics:
 | Topic | Trigger | What it does |
 | --- | --- | --- |
 | Initialize JD Update | The agent chooses | Explains the review, collects reasons and sections, loads the job description, sets up state |
-| Continue JD Update (the hub) | The agent chooses, plus redirects | Decides which section comes next; handles back, skip and jump, then returns the user to the step they were on |
+| Continue JD Update (the hub) | The agent chooses, plus redirects | Decides which section comes next; handles going back and returning the user to the step they were on; declines requests to skip ahead |
 | JD Section – Purpose (and one per section) | It's redirected to | Shows current text, keep or revise, AI comments and flags, saves the change |
 | Review JD Changes | The agent chooses, plus redirects | Shows requested changes; revise, remove, keep reviewing, or submit |
 | Switch JD Job | The agent chooses | Confirms discarding changes, resets state, restarts the job search |
@@ -69,7 +69,7 @@ These are the five sections managers can revise, in the order they appear on the
 
 ### 1.4 Create the JD Section entity
 
-The hub uses this entity so the orchestrator can turn "go back to duties" or "skip this one" into a clean value.
+The hub uses this entity so the orchestrator can turn "go back to duties" into a clean value. The **Next** item and its "skip" synonyms stay in the list on purpose. They let the hub recognize a skip request so it can decline it, or end a detour early.
 
 1. Go to **Settings → Entities → Add an entity → Closed list**.
 2. Name it **JD Section**.
@@ -117,7 +117,7 @@ You will create most of these in the setup nodes of Initialize JD Update (Step 3
 | Global.AllSections | Table | Initialize | Master list of the five sections from Step 1.3. |
 | Global.Sections | Table | Initialize | The sections this user chose, in job description order. |
 | Global.CurrentStep | Number | Initialize | Step number of the section open now. 99 means the summary. |
-| Global.ReturnStep | Number | Initialize | Where to send the user after a detour (going back or jumping). 0 means no detour; 99 means back to the summary. |
+| Global.ReturnStep | Number | Initialize | Where to send the user after a detour back to an earlier section. 0 means no detour; 99 means back to the summary. |
 | Global.ChangeLog | Table | Initialize | One row per revised section. |
 
 ### 2.3 Why CurrentStep uses step numbers
@@ -139,6 +139,43 @@ Both return blank when there is no next or previous section. That is how the hub
 4. From KSA the review carries on in order.
 
 If the user makes another detour before finishing the first one (for example Purpose, then Duties), `ReturnStep` keeps the original step 4. They still end up where they started. Revising a section from the summary works the same way, with `ReturnStep = 99`.
+
+### 2.5 The no-skipping rule
+
+Users can go to any section they have already reached, but never past it. The furthest step reached is always:
+
+```
+If(Global.ReturnStep <> 0, Global.ReturnStep, Global.CurrentStep)
+```
+
+When the user is not on a detour, they are on their furthest step. When they are on a detour, `ReturnStep` holds it. At the summary it is 99, so every section can be revised. No extra variable is needed.
+
+The rule is enforced in three places:
+
+1. **The hub, Node 3.** Typed requests like "let's do certifications" or "skip this" are declined when they would move past the furthest step.
+2. **Review JD Changes.** The summary card only offers sections up to the furthest step, and the Revise branch checks again.
+3. **Submit.** Only allowed when `Global.CurrentStep = 99`, which means every section has been reviewed.
+
+Section topics cannot be opened any other way, because their trigger is **It's redirected to**.
+
+### 2.6 The detour formula
+
+The hub and Review JD Changes both use this formula to set `Global.ReturnStep` when sending the user to an earlier step. Here T is the target step.
+
+```
+If(
+  T = Global.ReturnStep, 0,
+  If(Global.ReturnStep = 0 And T <> Global.CurrentStep, Global.CurrentStep, Global.ReturnStep)
+)
+```
+
+It works like this:
+
+- Going to the step the user is returning to ends the detour (0).
+- The first detour saves the current step.
+- Later detours keep the original step.
+
+Without the first check, a user who goes straight back to the section they came from would see it twice.
 
 ## Step 3: Build Initialize JD Update
 
@@ -309,7 +346,7 @@ The first copy of the card stays in the chat and can still be clicked. Either co
 
 ## Step 4: Build the hub, Continue JD Update
 
-The hub is the only topic that decides where the user goes next. It applies any navigation request and remembers where to return after a detour. It opens the section for `Global.CurrentStep`, then advances or returns when that section ends. It loops until every section is done, and finishes by opening the summary.
+The hub is the only topic that decides where the user goes next. It applies navigation requests (going back is allowed, skipping ahead is not) and remembers where to return after a detour. It opens the section for `Global.CurrentStep`, then advances or returns when that section ends. It loops until every section is done, and finishes by opening the summary.
 
 ### 4.1 Trigger and description
 
@@ -317,7 +354,7 @@ The hub is the only topic that decides where the user goes next. It applies any 
 2. Trigger: **The agent chooses**.
 3. Description:
 
-> Moves the user through the job description update in progress. Use when the user wants to continue after a side question, go back to an earlier or previous section, skip a section, move on, or jump to a specific section such as purpose, duties, education, KSAs or certifications. Do not use to start a new update.
+> Moves the user through the job description update in progress. Use when the user wants to continue after a side question, go back to an earlier or previous section, or return from one. Also use when the user asks to skip a section, move on, or jump to a section such as purpose, duties, education, KSAs or certifications; this topic decides whether that is allowed. Do not use to start a new update.
 
 ### 4.2 Input
 
@@ -326,7 +363,7 @@ Add one input under **Details → Inputs**:
 - Name: **TargetSection**
 - Type: the **JD Section** entity from Step 1.4. (If your version only offers basic types for inputs, use String and list the allowed values in the description.)
 - Let the agent fill it automatically; do not prompt the user.
-- Description: "The section the user wants to go to: Purpose, Duties, Education, KSA or Certifications. Use Previous for going back, Next for skipping, Summary for reviewing changes. Leave empty when the user just wants to continue."
+- Description: "The section the user wants to go to: Purpose, Duties, Education, KSA or Certifications. Use Previous for going back, Next when the user asks to skip or move on, and Summary for reviewing changes. Leave empty when the user just wants to continue."
 
 ### 4.3 Nodes, in order
 
@@ -334,21 +371,30 @@ Add one input under **Details → Inputs**:
 
 - True: **Message** "There's no update in progress right now. Which job would you like to update?" then **End current topic**.
 
-**Node 2 – Set Topic.Target.** Create a string topic variable `Topic.Target` = `Text(Topic.TargetSection)`. This turns the entity value into plain text for the formulas below. If you used a String input, set it to `Topic.TargetSection` directly.
+**Node 2 – Set the working values.** Create three topic variables with Set a variable value nodes:
+
+| Topic variable | Value |
+| --- | --- |
+| Topic.Target (String) | `Text(Topic.TargetSection)`. If you used a String input, use `Topic.TargetSection` directly. |
+| Topic.TargetStep (Number) | `LookUp(Global.AllSections, Name = Topic.Target).Step` (blank for Previous, Next and Summary) |
+| Topic.Furthest (Number) | `If(Global.ReturnStep <> 0, Global.ReturnStep, Global.CurrentStep)` |
 
 **Node 3 – Condition: apply the navigation request.** Add a Condition node with these branches:
 
 | Branch condition | Nodes inside the branch |
 | --- | --- |
-| `Topic.Target = "Previous"` | 1. **Condition** `IsBlank(Last(Filter(Global.Sections, Step < Global.CurrentStep)))`. If true: **Message** "You're already on the first section." and do nothing else. 2. Otherwise, set `Global.ReturnStep` = `If(Global.ReturnStep = 0, Global.CurrentStep, Global.ReturnStep)`. 3. Set `Global.CurrentStep` = `Last(Filter(Global.Sections, Step < Global.CurrentStep)).Step` |
-| `Topic.Target = "Next"` | If `Global.ReturnStep <> 0`: set `Global.CurrentStep` = `Global.ReturnStep`, then set `Global.ReturnStep` = `0`. Otherwise: set `Global.CurrentStep` = `Coalesce(First(Filter(Global.Sections, Step > Global.CurrentStep)).Step, 99)` |
+| `Topic.Target = "Previous"` | 1. **Condition** `IsBlank(Last(Filter(Global.Sections, Step < Global.CurrentStep)))`. If true: **Message** "You're already on the first section." then **End current topic**. 2. Otherwise, set `Global.ReturnStep` = `If(Global.ReturnStep = 0, Global.CurrentStep, Global.ReturnStep)`. 3. Set `Global.CurrentStep` = `Last(Filter(Global.Sections, Step < Global.CurrentStep)).Step` |
+| `Topic.Target = "Next"` | 1. **Condition** `Global.ReturnStep <> 0` (on a detour): set `Global.CurrentStep` = `Global.ReturnStep`, then set `Global.ReturnStep` = `0`. 2. All other conditions: **Message** "Sections are reviewed in order, so I can't skip ahead. To leave {LookUp(Global.AllSections, Step = Global.CurrentStep).Label} unchanged, choose Keep as is." then **End current topic** |
 | `Topic.Target = "Summary"` | **Redirect** to Review JD Changes, then **End current topic** |
-| `!IsBlank(LookUp(Global.AllSections, Name = Topic.Target))` | 1. Set `Global.Sections` = `Filter(Global.AllSections, Name in Global.Sections.Name Or Name = Topic.Target)`. 2. Set `Global.ReturnStep` = `If(Global.ReturnStep = 0 And LookUp(Global.AllSections, Name = Topic.Target).Step <> Global.CurrentStep, Global.CurrentStep, Global.ReturnStep)`. 3. Set `Global.CurrentStep` = `LookUp(Global.AllSections, Name = Topic.Target).Step` |
+| `!IsBlank(Topic.TargetStep) && Topic.TargetStep > Topic.Furthest` | **Message** "We'll get to {LookUp(Global.AllSections, Name = Topic.Target).Label} in order. Let's finish {LookUp(Global.AllSections, Step = Global.CurrentStep).Label} first." then **End current topic** |
+| `!IsBlank(Topic.TargetStep)` | 1. Set `Global.Sections` = `Filter(Global.AllSections, Name in Global.Sections.Name Or Name = Topic.Target)`. 2. Set `Global.ReturnStep` with the detour formula from Step 2.6, using `Topic.TargetStep` as T. 3. Set `Global.CurrentStep` = `Topic.TargetStep` |
 | All other conditions | Leave empty (the user just wants to carry on) |
 
-The order matters: always set `ReturnStep` before changing `CurrentStep`, because `ReturnStep` saves the step the user is leaving.
+The branch order matters, because a Condition node runs the first branch that matches. The "past the furthest step" branch must sit above the allowed-section branch. In every branch, set `ReturnStep` before changing `CurrentStep`.
 
-The fourth branch also adds the section to the user's list if they skipped it on the card. That makes "actually, let's do certifications too" work.
+The declining branches end with **End current topic**, not a redirect. Navigation requests arrive while a section question is paused, so ending the hub returns the user to that same paused question.
+
+The allowed-section branch also adds a section the user didn't pick on the card, as long as it comes before their furthest step. For example, "can we also look at education?" works from KSA, but not from Duties.
 
 **Node 4 – Set Topic.SectionName** (rename this node **Dispatch**; the loop returns here). Value: `LookUp(Global.Sections, Step = Global.CurrentStep).Name`.
 
@@ -380,9 +426,10 @@ Create the section topics in Step 5 first if the Redirect picker cannot find the
 - **Side question mid-section.** The section topic pauses on its question, the orchestrator answers, and the section asks the same question again. The hub never runs, and nothing changes.
 - **"Go back."** The orchestrator starts a new copy of the hub with TargetSection = Previous. Node 3 saves the current step in ReturnStep and opens the previous section. When that section ends, Node 7 sends the user straight back to the section they were on.
 - **"Go back to purpose" from section 4.** The same path with a named section. Sections 2 and 3 are not repeated on the way back.
-- **Several detours in a row.** ReturnStep keeps the first step saved, so the user always returns to where they started.
-- **"Let's do certifications" (jumping ahead).** This is also a detour. After Certifications, the user returns to their section and carries on in order. When the review reaches Certifications again, it offers Keep my change (Step 5, Node 3), so nothing is lost.
-- **"Skip this."** On a detour, this returns the user to where they were. Otherwise it moves to the next section. Either way, the skipped section is left as it is today.
+- **Several detours in a row.** ReturnStep keeps the first step saved, so the user always returns to where they started. Asking for the section they came from ends the detour.
+- **"Let's do certifications" before reaching it.** Declined. The agent says the sections are reviewed in order, and the paused section question asks again.
+- **"Skip this."** On a detour, this returns the user to where they came from. Otherwise it is declined, and the agent points the user to Keep as is.
+- **Mid-review summary.** Review JD Changes only offers the sections the user has reached. Submit only works after every section is reviewed.
 - **Work in progress.** If the user leaves a section before choosing Accept, that unaccepted change is not saved. When they come back, the section starts fresh. Old copies of the hub and section topics stay paused underneath until End all topics clears them at submit (Step 7) or switch (Step 8).
 
 ## Step 5: Build the prompt and the section topics
@@ -619,10 +666,13 @@ If(
   body: [
     { type: "TextBlock", text: "What would you like to do next?", weight: "Bolder", wrap: true },
     { type: "Input.ChoiceSet", id: "section", placeholder: "Choose a section (for revise or remove)",
-      choices: ForAll(Global.AllSections, { title: ThisRecord.Label, value: ThisRecord.Name }) }
+      choices: ForAll(
+        Filter(Global.AllSections,
+          Step <= If(Global.ReturnStep <> 0, Global.ReturnStep, Global.CurrentStep)),
+        { title: ThisRecord.Label, value: ThisRecord.Name }) }
   ],
   actions: [
-    { type: "Action.Submit", title: "Submit to HR", data: { action: "submit", req: Global.RequestId } },
+    { type: "Action.Submit", title: If(Global.CurrentStep = 99, "Submit to HR", "Submit (after all sections)"), data: { action: "submit", req: Global.RequestId } },
     { type: "Action.Submit", title: "Revise selected section", data: { action: "revise", req: Global.RequestId } },
     { type: "Action.Submit", title: "Remove selected change", data: { action: "remove", req: Global.RequestId } },
     { type: "Action.Submit", title: "Keep reviewing", data: { action: "continue", req: Global.RequestId } }
@@ -635,7 +685,7 @@ Then:
 1. Click **Edit schema** and confirm the outputs `action`, `req` and `section` (all strings). Save them to topic variables with the same names.
 2. In **Properties**, turn on **Allow switching to another topic**.
 
-The section list covers all five sections, so users can revise one they originally kept.
+The section list only includes sections up to the furthest step the user has reached (Step 2.5). Mid-review, the summary can't be used to jump ahead. At the end, every section is listed, including ones the user originally kept or didn't pick.
 
 **Node 4 – Condition: card from an earlier update.** Condition: `Topic.req <> Global.RequestId`. If true: **Message** "That card is from an earlier update. Here's your current list." then **Go to step → Show changes**.
 
@@ -643,8 +693,8 @@ The section list covers all five sections, so users can revise one they original
 
 **Branch: `Topic.action = "submit"`**
 
-1. **Condition** `CountRows(Global.ChangeLog) = 0`. If true: **Message** "There aren't any changes to send yet. Pick a section to revise, or keep reviewing." then **Go to step → Summary card**.
-2. **Condition** `Global.CurrentStep <> 99`. If true: **Question** (Boolean) "You still have sections you haven't reviewed. Send what you have to HR anyway?" If No: **Go to step → Summary card**.
+1. **Condition** `Global.CurrentStep <> 99`. If true: **Message** "You can submit once you've reviewed every section. Choose Keep reviewing to carry on." then **Go to step → Summary card**.
+2. **Condition** `CountRows(Global.ChangeLog) = 0`. If true: **Message** "There aren't any changes to send. Pick a section to revise, or you're all set if nothing needs to change." then **Go to step → Summary card**.
 3. **Add a tool → Submit JD Update Request** with RequestId = `Global.RequestId`, JobCode = `Global.JobCode`, JobTitle = `Global.JobTitle`, UpdateReasons = `Global.UpdateReasons`, ChangesJson = `JSON(Global.ChangeLog)`.
 4. **Message** "Done. Your requested changes for {Global.JobTitle} are saved for HR review."
 5. Reset the update (same Set nodes as Step 8, Node 2).
@@ -653,10 +703,11 @@ The section list covers all five sections, so users can revise one they original
 **Branch: `Topic.action = "revise"`**
 
 1. **Condition** `IsBlank(Topic.section)`. If true: **Message** "Pick a section first." then **Go to step → Summary card**.
-2. Set `Global.Sections` = `Filter(Global.AllSections, Name in Global.Sections.Name Or Name = Topic.section)`.
-3. Set `Global.ReturnStep` = `If(Global.ReturnStep = 0, Global.CurrentStep, Global.ReturnStep)`. At the end of the review CurrentStep is 99, so the user comes back to the summary. Mid-review, they come back to the section they were on.
-4. Set `Global.CurrentStep` = `LookUp(Global.AllSections, Name = Topic.section).Step`.
-5. **Redirect** to Continue JD Update (TargetSection empty), then **End current topic**.
+2. **Condition** `LookUp(Global.AllSections, Name = Topic.section).Step > If(Global.ReturnStep <> 0, Global.ReturnStep, Global.CurrentStep)`. If true: **Message** "You haven't reached that section yet. We'll get to it in order." then **Go to step → Summary card**. This catches older copies of the card, which may list more sections.
+3. Set `Global.Sections` = `Filter(Global.AllSections, Name in Global.Sections.Name Or Name = Topic.section)`.
+4. Set `Global.ReturnStep` with the detour formula from Step 2.6, using `LookUp(Global.AllSections, Name = Topic.section).Step` as T. At the end of the review, CurrentStep is 99, so the user comes back to the summary. Mid-review, they come back to the section they were on.
+5. Set `Global.CurrentStep` = `LookUp(Global.AllSections, Name = Topic.section).Step`.
+6. **Redirect** to Continue JD Update (TargetSection empty), then **End current topic**.
 
 **Branch: `Topic.action = "remove"`**
 
@@ -738,7 +789,9 @@ Open **Overview → Instructions** and add this block. Keep anything you already
 ```
 Job description updates
 - Updating a job description is a guided review that is started and finished in one conversation. First find the job with the job search tool. When the user picks a job and wants to update it, use Initialize JD Update with that job's code and title.
-- While an update is in progress, never start a new update. To go back to an earlier section, skip, jump to a section, or carry on after a side question, use Continue JD Update. To see, remove or submit changes, use Review JD Changes. To update a different job, use Switch JD Job.
+- Sections are reviewed in order. Users can go back to sections they have already reached, but they cannot skip ahead, and they can submit only after every section is reviewed.
+- While an update is in progress, never start a new update. To go back to an earlier section, return from one, or carry on after a side question, use Continue JD Update. If the user asks to skip or jump to a later section, also use Continue JD Update; it explains that sections are reviewed in order. Never skip sections yourself.
+- To see, remove or submit changes, use Review JD Changes. To update a different job, use Switch JD Job.
 - If the user asks a question during an update, answer it briefly and do not restart or leave the update. The review picks up at the same step after your answer.
 - Looking at or comparing another job's description during an update is a side question. It is not a switch. Answer it without changing the job being updated.
 - There are no saved drafts. If the user asks to save and finish later, explain that the update must be finished and submitted in this conversation, and offer to keep going.
@@ -753,7 +806,7 @@ Only these four topics should be visible to the orchestrator. Their descriptions
 | Topic | Should fire on | Should NOT fire on |
 | --- | --- | --- |
 | Initialize JD Update | "I want to update the Loan Officer JD" after the job is found | "continue", "go back" |
-| Continue JD Update | "continue", "go back", "skip this", "let's do duties" | "update a different job" |
+| Continue JD Update | "continue", "go back", "go back to duties", and also "skip this" or "let's do certifications" (it declines forward moves) | "update a different job" |
 | Review JD Changes | "what have I changed?", "I'm ready to submit", "remove my education change" | a question about what a section means |
 | Switch JD Job | "I want to update a different job instead" | "what does the Senior Analyst JD say?" |
 
@@ -784,22 +837,26 @@ Run each case in the test pane, starting from a fresh test conversation (use the
 
 ### Navigation
 
-- [ ] **Go back one, then return.** In section 3, say "go back." Revise section 2 and accept. Expect: straight back to section 3, not a repeat of section 2's neighbours.
+- [ ] **Go back one, then return.** In section 3, say "go back." Revise section 2 and accept. Expect: straight back to section 3.
 - [ ] **Go back several.** In section 4, say "go back to purpose." Accept a change. Expect: back to section 4 directly, with sections 2 and 3 not repeated.
 - [ ] **Back twice.** In section 3, say "go back," then in section 2 say "go back" again. Expect: after section 1, you return to section 3.
-- [ ] **Back from the first section.** In section 1, say "go back." Expect: "You're already on the first section," then section 1 again.
+- [ ] **End a detour early.** From section 4, go back to purpose, then say "let's do KSA." Expect: KSA opens, and after it the review continues to section 5, not KSA a second time.
+- [ ] **Back from the first section.** In section 1, say "go back." Expect: "You're already on the first section," then section 1's question again.
 - [ ] **Returning to a changed section.** Go back to a section you revised. Expect: your earlier change is shown, with Keep my change, Revise my change and Remove my change. Choosing Keep my change leaves the summary unchanged.
-- [ ] **Jump ahead.** In section 2, say "let's do certifications." Expect: Certifications, then back to section 2, then on in order. When the review reaches Certifications again, Keep my change is offered.
-- [ ] **Jump to an unselected section.** Say "let's do certifications too" when it wasn't picked on the card. Expect: it opens and the counter now includes it.
+- [ ] **Jump ahead is blocked.** In section 2, say "let's do certifications." Expect: "We'll get to Certifications/Licenses in order…", then section 2's question again.
+- [ ] **Skip is blocked.** In section 2, say "skip this." Expect: "…I can't skip ahead… choose Keep as is," then section 2's question again.
 - [ ] **Skip on a detour.** Go back to section 1, then say "skip this." Expect: straight back to the section you came from.
+- [ ] **Earlier unselected section.** Leave Education unticked on the card. In KSA, say "can we also look at education?" Expect: Education opens and the counter includes it, then back to KSA.
+- [ ] **Later unselected section is blocked.** Leave Certifications unticked. In Duties, say "add certifications." Expect: the in-order message.
 - [ ] **Changes so far.** Mid-section, say "show my changes so far," then choose Keep reviewing. Expect: "Back to \[section\]" and the same section again.
 
 ### Summary actions
 
 - [ ] **Revise from summary.** At the end, revise one section. Expect: only that section, then straight back to the summary.
+- [ ] **Mid-review summary list.** In section 2, open your changes. Expect: the dropdown lists only sections 1 and 2.
 - [ ] **Remove.** Remove a change. Expect: it disappears from the list.
-- [ ] **Early submit.** Submit before finishing every section. Expect: the "still have sections" warning.
-- [ ] **Old card.** Scroll up and click an earlier copy of the summary card. Expect: it acts on the current list, or says the card is from an earlier update.
+- [ ] **Early submit is blocked.** Mid-review, open your changes and press Submit. Expect: "You can submit once you've reviewed every section," and the card again.
+- [ ] **Old card.** Scroll up to an earlier copy of the summary card and pick a section you haven't reached, or click it after switching jobs. Expect: "You haven't reached that section yet" or "That card is from an earlier update."
 
 ### Switching jobs
 
@@ -820,8 +877,14 @@ Most problems come from four things: a missing **Allow switching** setting, a se
 | A typed question at a card or choice question gets "I didn't understand" or a re-prompt | Interruptions are off on that node | Properties → Allow switching to another topic |
 | The orchestrator opens a section topic directly, with a blank job description | The section topic's trigger is The agent chooses | Change it to It's redirected to (Step 9.3) |
 | "Go back" or "continue" restarts the update | Initialize's description is too broad, or Node 2 is missing | Keep the "Do not use" sentence and the UpdateActive check |
-| After going back, the user has to redo every section in between | ReturnStep is not being set, or Node 7 ignores it | Set ReturnStep before changing CurrentStep (Step 4, Node 3); check the ReturnStep branch in Node 7 |
-| After a detour, the user lands on the wrong section | ReturnStep was overwritten by a second detour | Use `If(Global.ReturnStep = 0, …)` so only the first detour saves it |
+| The user can jump to a later section | The "past the furthest step" branch is missing, or it sits below the allowed-section branch | Put it above the allowed-section branch in hub Node 3 |
+| "Skip this" moves to the next section | The Next branch advances even when the user is not on a detour | Only move when ReturnStep <> 0; otherwise decline |
+| The agent handles "skip" itself, or picks another topic | The hub description doesn't mention skip requests | Keep the "Also use when the user asks to skip…" sentence so the hub can decline |
+| After declining a skip, the section starts over instead of re-asking | The declining branch redirects instead of ending | End those branches with End current topic |
+| The summary lists sections the user hasn't reached | The card choices are built from all sections | Filter them by the furthest step (Step 7, Node 3) |
+| Submit works mid-review | The submit branch is missing the CurrentStep = 99 check | Add it as the first condition in the submit branch |
+| After going back, the user has to redo every section in between | ReturnStep is not being set, or Node 7 ignores it | Set ReturnStep before changing CurrentStep; check the ReturnStep branch in Node 7 |
+| After a detour, the user lands on the wrong section, or sees a section twice | ReturnStep is overwritten or never cleared | Use the detour formula in Step 2.6 |
 | Returning to a section erases the user's change | The section topic has only Keep as is and Revise | Add the second question for existing changes (Step 5, Node 3) |
 | Comparing another job switches the job | Switch JD Job's description is too broad | Keep its "Do not use when the user only wants to look at…" sentence |
 | An old section question pops up after submit or switch | No End all topics at the end of submit or Switch JD Job | Add End all topics as the last node |
