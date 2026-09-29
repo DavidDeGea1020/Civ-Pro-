@@ -1,0 +1,5 @@
+If(
+  "Other" in Topic.reasons,
+  Substitute(Topic.reasons, "Other", "Other: " & Topic.reasonsOther),
+  Topic.reasons & If(IsBlank(Topic.reasonsOther), "", ". Notes: " & Topic.reasonsOther)
+)
