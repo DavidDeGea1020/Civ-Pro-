@@ -1,0 +1,14 @@
+With(
+  {lines: Filter(Split(Substitute(Global.JD.Duties, Char(13), ""), Char(10)), !IsBlank(Trim(Value)))},
+  Concat(
+    ForAll(
+      Sequence(CountRows(lines)),
+      With(
+        {t: Trim(Index(lines, Value).Value)},
+        {n: Value, t: If(Left(t, 1) in ["•", "-", "*", "·", "–", "◦", "▪"], Trim(Mid(t, 2)), t)}
+      )
+    ),
+    n & ". " & t,
+    Char(10)
+  )
+)
