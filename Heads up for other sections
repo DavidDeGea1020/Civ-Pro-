@@ -1,0 +1,10 @@
+"Heads up for other sections:" & Char(10) &
+Concat(
+  Topic.Review.followUps As f,
+  "- " & Coalesce(
+    LookUp(Global.AllSections,
+      Lower(Name) = Lower(Trim(f.section)) Or Lower(Label) = Lower(Trim(f.section))).Label,
+    f.section) &
+  ": " & f.reminder,
+  Char(10)) &
+Char(10) & "I'll remind you when we get there. For an earlier section, just say go back to and the section name."
